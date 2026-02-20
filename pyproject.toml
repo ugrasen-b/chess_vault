@@ -1,0 +1,42 @@
+[project]
+name = "chess-vault"
+version = "0.1.0"
+description = "Local chess game vault and analysis pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Bob" }]
+dependencies = [
+  "httpx>=0.28.0",
+  "sqlalchemy>=2.0.36",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.8.0",
+  "mypy>=1.13.0",
+]
+
+[project.scripts]
+chess-vault = "chess_vault.cli:main"
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
