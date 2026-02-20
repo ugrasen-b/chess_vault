@@ -57,3 +57,38 @@ def test_normalize_pgn_uses_hash_when_site_is_not_unique() -> None:
     assert game_a.source_game_id != "Chess.com"
     assert game_b.source_game_id != "Chess.com"
     assert game_a.source_game_id != game_b.source_game_id
+
+
+def test_normalize_pgn_derives_opening_from_eco_url() -> None:
+    pgn = '''
+[Event "Live Chess"]
+[Site "Chess.com"]
+[Date "2026.02.20"]
+[White "alice"]
+[Black "bob"]
+[Result "1-0"]
+[ECO "B20"]
+[ECOUrl "https://www.chess.com/openings/Sicilian-Defense-Smith-Morra-Gambit"]
+
+1. e4 c5 2. d4 cxd4 3. c3 1-0
+'''.strip()
+
+    game = normalize_pgn(source="chesscom", raw_pgn=pgn)
+    assert game.opening == "Sicilian Defense Smith Morra Gambit"
+
+
+def test_normalize_pgn_uses_eco_when_opening_and_eco_url_missing() -> None:
+    pgn = '''
+[Event "Live Chess"]
+[Site "Chess.com"]
+[Date "2026.02.20"]
+[White "alice"]
+[Black "bob"]
+[Result "1-0"]
+[ECO "C20"]
+
+1. e4 e5 1-0
+'''.strip()
+
+    game = normalize_pgn(source="chesscom", raw_pgn=pgn)
+    assert game.opening == "C20"

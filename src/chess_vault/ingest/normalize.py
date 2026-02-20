@@ -27,6 +27,7 @@ class NormalizedGame:
 def normalize_pgn(source: str, raw_pgn: str) -> NormalizedGame:
     headers = _extract_headers(raw_pgn)
     source_game_id = _derive_source_game_id(headers=headers, raw_pgn=raw_pgn)
+    opening = _derive_opening(headers=headers)
     return NormalizedGame(
         source_game_id=source_game_id,
         source=source,
@@ -35,7 +36,7 @@ def normalize_pgn(source: str, raw_pgn: str) -> NormalizedGame:
         result=headers.get("Result"),
         time_control=headers.get("TimeControl"),
         eco=headers.get("ECO"),
-        opening=headers.get("Opening"),
+        opening=opening,
         event=headers.get("Event"),
         site=headers.get("Site"),
         played_at=_parse_date(headers.get("UTCDate"), headers.get("UTCTime"), headers.get("Date")),
@@ -65,6 +66,25 @@ def _derive_source_game_id(headers: dict[str, str], raw_pgn: str) -> str:
             return site_value
     digest = hashlib.sha256(raw_pgn.encode("utf-8")).hexdigest()
     return digest
+
+
+def _derive_opening(headers: dict[str, str]) -> str | None:
+    explicit = (headers.get("Opening") or "").strip()
+    if explicit:
+        return explicit
+
+    eco_url = (headers.get("ECOUrl") or "").strip()
+    if eco_url:
+        # Common format: https://www.chess.com/openings/Sicilian-Defense
+        slug = eco_url.rstrip("/").rsplit("/", 1)[-1]
+        if slug:
+            return slug.replace("-", " ")
+
+    eco = (headers.get("ECO") or "").strip()
+    if eco:
+        return eco
+
+    return None
 
 
 def _parse_date(utc_date: str | None, utc_time: str | None, date: str | None) -> datetime | None:
