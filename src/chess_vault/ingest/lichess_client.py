@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import re
 from typing import Iterable
 
 import httpx
@@ -15,13 +16,12 @@ class LichessClient:
         self.settings = get_settings()
 
     def fetch_user_games_pgn(self, username: str, max_games: int = 50) -> list[str]:
-        headers = {"Accept": "application/x-ndjson"}
+        headers = {"Accept": "application/x-chess-pgn"}
         if self.settings.lichess_token:
             headers["Authorization"] = f"Bearer {self.settings.lichess_token}"
 
         params = {
             "max": max_games,
-            "pgnInJson": False,
             "moves": True,
             "clocks": False,
             "evals": False,
@@ -37,7 +37,8 @@ class LichessClient:
 
 
 def _split_pgn_batch(payload: str) -> list[str]:
-    blocks = payload.split("\n\n\n")
+    # Lichess bulk PGN exports are separated by blank lines before next [Event ...] block.
+    blocks = re.split(r"\n{2,}(?=\[Event\s+\")", payload.strip())
     return [b.strip() for b in blocks if b.strip()]
 
 
