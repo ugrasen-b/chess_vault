@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Bob" }]
 dependencies = [
   "httpx>=0.28.0",
+  "python-chess>=1.999",
   "sqlalchemy>=2.0.36",
 ]
 
@@ -15,6 +16,7 @@ dev = [
   "pytest>=8.3.0",
   "ruff>=0.8.0",
   "mypy>=1.13.0",
+  "streamlit>=1.41.0",
 ]
 
 [project.scripts]
