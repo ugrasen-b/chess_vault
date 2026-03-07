@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session
 from chess_vault.analysis.engine import StockfishAnalyzer
 from chess_vault.db.models import AnalysisRun, EngineEval, Game, GameMistake
 
+MATE_CP_THRESHOLD = 90_000
+
 
 @dataclass(frozen=True)
 class PositionBoundary:
@@ -37,6 +39,10 @@ class AnalyzeSummary:
     analysis_run_id: int
     games_scanned: int
     mistakes_found: int
+
+
+def is_mate_score(score_cp: int) -> bool:
+    return abs(score_cp) >= MATE_CP_THRESHOLD
 
 
 def extract_position_boundaries(raw_pgn: str) -> list[PositionBoundary]:
@@ -178,22 +184,23 @@ class AnalysisService:
                     drop_to_cp=drop_to_cp,
                     lookahead_plies=lookahead_plies,
                 )
-                for finding in findings:
+                strongest = max(findings, key=lambda f: f.swing_cp) if findings else None
+                if strongest is not None:
                     self.session.add(
                         GameMistake(
                             analysis_run_id=run.id,
                             game_id=game.id,
                             player=player,
                             category="thrown_advantage",
-                            ply=finding.ply,
-                            fen=finding.fen,
-                            move_uci=finding.move_uci,
-                            before_eval_cp=finding.before_eval_cp,
-                            after_eval_cp=finding.after_eval_cp,
-                            swing_cp=finding.swing_cp,
+                            ply=strongest.ply,
+                            fen=strongest.fen,
+                            move_uci=strongest.move_uci,
+                            before_eval_cp=strongest.before_eval_cp,
+                            after_eval_cp=strongest.after_eval_cp,
+                            swing_cp=strongest.swing_cp,
                         )
                     )
-                total_mistakes += len(findings)
+                    total_mistakes += 1
 
             run.games_scanned = len(games)
             run.mistakes_found = total_mistakes
@@ -211,17 +218,46 @@ class AnalysisService:
         player: str,
         category: str = "thrown_advantage",
         limit: int = 20,
+        latest_run_only: bool = True,
+        dedupe_by_game: bool = True,
     ) -> list[GameMistake]:
-        stmt = (
-            select(GameMistake)
-            .where(
-                func.lower(GameMistake.player) == player.strip().lower(),
-                GameMistake.category == category,
-            )
-            .order_by(desc(GameMistake.swing_cp))
-            .limit(limit)
+        norm_player = player.strip().lower()
+
+        latest_run_id: int | None = None
+        if latest_run_only:
+            latest_run = self.session.execute(
+                select(AnalysisRun)
+                .where(func.lower(AnalysisRun.player) == norm_player)
+                .order_by(desc(AnalysisRun.id))
+                .limit(1)
+            ).scalar_one_or_none()
+            if latest_run is None:
+                return []
+            latest_run_id = latest_run.id
+
+        stmt = select(GameMistake).where(
+            func.lower(GameMistake.player) == norm_player,
+            GameMistake.category == category,
         )
-        return self.session.execute(stmt).scalars().all()
+        if latest_run_id is not None:
+            stmt = stmt.where(GameMistake.analysis_run_id == latest_run_id)
+
+        # Pull a wider candidate set, then enforce one-row-per-game in Python when requested.
+        raw_rows = self.session.execute(stmt.order_by(desc(GameMistake.swing_cp)).limit(1000)).scalars().all()
+
+        if not dedupe_by_game:
+            return raw_rows[:limit]
+
+        out: list[GameMistake] = []
+        seen_game_ids: set[int] = set()
+        for row in raw_rows:
+            if row.game_id in seen_game_ids:
+                continue
+            seen_game_ids.add(row.game_id)
+            out.append(row)
+            if len(out) >= limit:
+                break
+        return out
 
     def _get_or_create_eval(
         self,

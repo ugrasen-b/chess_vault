@@ -6,6 +6,7 @@ from chess_vault.analysis.analyze_service import (
     PositionBoundary,
     detect_thrown_advantage,
     extract_position_boundaries,
+    is_mate_score,
 )
 
 
@@ -48,3 +49,9 @@ def test_detect_thrown_advantage_flags_drop() -> None:
     assert finding.before_eval_cp == 280
     assert finding.after_eval_cp == -20
     assert finding.swing_cp == 300
+
+
+def test_is_mate_score_threshold() -> None:
+    assert is_mate_score(100000)
+    assert is_mate_score(-90000)
+    assert not is_mate_score(89999)

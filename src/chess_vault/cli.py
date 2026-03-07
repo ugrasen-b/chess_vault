@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from chess_vault.analysis.analyze_service import AnalysisService
+from chess_vault.analysis.analyze_service import AnalysisService, is_mate_score
 from chess_vault.analysis.features import build_player_report
 from chess_vault.db.session import init_db, make_session_factory
 from chess_vault.ingest.sync_service import SyncService
@@ -141,12 +141,16 @@ def main() -> None:
                 player=args.player,
                 category=args.type,
                 limit=max(1, args.limit),
+                latest_run_only=True,
+                dedupe_by_game=True,
             )
             print(f"mistakes={len(rows)}")
             for row in rows:
+                mate_swing = is_mate_score(row.before_eval_cp) or is_mate_score(row.after_eval_cp)
                 print(
                     f"  - game_id={row.game_id} ply={row.ply} move={row.move_uci} "
-                    f"before={row.before_eval_cp} after={row.after_eval_cp} swing={row.swing_cp}"
+                    f"before={row.before_eval_cp} after={row.after_eval_cp} "
+                    f"swing={row.swing_cp} mate_swing={'yes' if mate_swing else 'no'}"
                 )
         return
 

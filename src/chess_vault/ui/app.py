@@ -5,12 +5,14 @@ from io import StringIO
 
 import chess
 import chess.pgn
+import chess.svg
 import streamlit as st
+import streamlit.components.v1 as components
 from sqlalchemy import desc, func, select
 
-from chess_vault.analysis.analyze_service import AnalysisService
+from chess_vault.analysis.analyze_service import AnalysisService, is_mate_score
 from chess_vault.analysis.features import build_player_report
-from chess_vault.db.models import AnalysisRun, Game, GameMistake
+from chess_vault.db.models import AnalysisRun, EngineEval, Game, GameMistake
 from chess_vault.db.session import init_db, make_session_factory
 from chess_vault.ingest.sync_service import SyncService
 
@@ -47,6 +49,52 @@ def _board_before_ply(raw_pgn: str, ply: int) -> chess.Board:
     for uci in moves[:plies_to_apply]:
         board.push_uci(uci)
     return board
+
+
+def _render_svg_board(
+    board: chess.Board,
+    size: int = 420,
+    orientation: chess.Color = chess.WHITE,
+    lastmove: chess.Move | None = None,
+    arrows: list[chess.svg.Arrow] | None = None,
+) -> None:
+    svg = chess.svg.board(
+        board=board,
+        size=size,
+        orientation=orientation,
+        lastmove=lastmove,
+        arrows=arrows or [],
+        coordinates=True,
+    )
+    components.html(svg, height=size + 10)
+
+
+def _lookup_best_move_uci(session, mistake: GameMistake) -> str | None:
+    run = session.execute(
+        select(AnalysisRun).where(AnalysisRun.id == mistake.analysis_run_id).limit(1)
+    ).scalar_one_or_none()
+    if run is None:
+        return None
+
+    exact = session.execute(
+        select(EngineEval)
+        .where(
+            EngineEval.fen == mistake.fen,
+            EngineEval.depth == run.depth,
+            EngineEval.engine_name == run.engine_name,
+            EngineEval.engine_version == run.engine_version,
+        )
+        .limit(1)
+    ).scalar_one_or_none()
+    if exact and exact.best_move_uci:
+        return exact.best_move_uci
+
+    fallback = session.execute(
+        select(EngineEval).where(EngineEval.fen == mistake.fen).order_by(desc(EngineEval.id)).limit(1)
+    ).scalar_one_or_none()
+    if fallback and fallback.best_move_uci:
+        return fallback.best_move_uci
+    return None
 
 
 def _render_sidebar() -> tuple[str, int, int]:
@@ -218,18 +266,22 @@ def _render_mistakes(session_factory, player: str) -> None:
     )
 
     with session_factory() as session:
-        stmt = (
-            select(GameMistake, Game)
-            .join(Game, GameMistake.game_id == Game.id)
-            .where(
-                func.lower(GameMistake.player) == player.lower(),
-                GameMistake.category == category,
-                GameMistake.swing_cp >= min_swing,
-            )
-            .order_by(desc(GameMistake.swing_cp))
-            .limit(limit)
+        service = AnalysisService(session)
+        mistakes = service.list_mistakes(
+            player=player,
+            category=category,
+            limit=500,
+            latest_run_only=True,
+            dedupe_by_game=True,
         )
-        rows = session.execute(stmt).all()
+        filtered = [m for m in mistakes if m.swing_cp >= min_swing][:limit]
+        if not filtered:
+            rows: list[tuple[GameMistake, Game]] = []
+        else:
+            game_ids = [m.game_id for m in filtered]
+            games = session.execute(select(Game).where(Game.id.in_(game_ids))).scalars().all()
+            game_map = {g.id: g for g in games}
+            rows = [(m, game_map[m.game_id]) for m in filtered if m.game_id in game_map]
 
     table = [
         {
@@ -243,6 +295,9 @@ def _render_mistakes(session_factory, player: str) -> None:
             "before_cp": mistake.before_eval_cp,
             "after_cp": mistake.after_eval_cp,
             "swing_cp": mistake.swing_cp,
+            "mate_swing": "yes"
+            if is_mate_score(mistake.before_eval_cp) or is_mate_score(mistake.after_eval_cp)
+            else "no",
             "fen": mistake.fen,
         }
         for idx, (mistake, game) in enumerate(rows)
@@ -263,6 +318,8 @@ def _render_mistakes(session_factory, player: str) -> None:
     selected_label = st.selectbox("Select mistake", options=labels, index=0)
     selected_index = labels.index(selected_label)
     selected_mistake, selected_game = rows[selected_index]
+    with session_factory() as session:
+        best_move_uci = _lookup_best_move_uci(session, selected_mistake)
 
     c1, c2 = st.columns(2)
     c1.write(f"Game ID: `{selected_game.id}`")
@@ -274,11 +331,40 @@ def _render_mistakes(session_factory, player: str) -> None:
     c2.write(f"Before: `{selected_mistake.before_eval_cp}`")
     c2.write(f"After: `{selected_mistake.after_eval_cp}`")
     c2.write(f"Swing: `{selected_mistake.swing_cp}`")
+    c2.write(
+        f"Mate Swing: `{'yes' if (is_mate_score(selected_mistake.before_eval_cp) or is_mate_score(selected_mistake.after_eval_cp)) else 'no'}`"
+    )
+    c2.write(f"Best Move (engine): `{best_move_uci or 'n/a'}`")
 
     st.markdown("Position at detected mistake (from stored FEN)")
     fen_board = chess.Board(selected_mistake.fen)
-    st.code(fen_board.unicode(), language="text")
-    st.caption(selected_mistake.fen)
+    board_size = int(st.slider("Board Size", min_value=280, max_value=720, value=480, step=20))
+    orientation_label = st.selectbox("Board Orientation", options=["White", "Black"], index=0)
+    orientation = chess.WHITE if orientation_label == "White" else chess.BLACK
+
+    try:
+        detected_move = chess.Move.from_uci(selected_mistake.move_uci)
+    except ValueError:
+        detected_move = None
+    try:
+        best_move = chess.Move.from_uci(best_move_uci) if best_move_uci else None
+    except ValueError:
+        best_move = None
+    arrows: list[chess.svg.Arrow] = []
+    if detected_move and detected_move in fen_board.legal_moves:
+        arrows.append(chess.svg.Arrow(detected_move.from_square, detected_move.to_square, color="#d62828"))
+    if best_move and best_move in fen_board.legal_moves:
+        arrows.append(chess.svg.Arrow(best_move.from_square, best_move.to_square, color="#2a9d8f"))
+
+    _render_svg_board(
+        fen_board,
+        size=board_size,
+        orientation=orientation,
+        lastmove=detected_move if (detected_move and detected_move in fen_board.legal_moves) else None,
+        arrows=arrows,
+    )
+    st.caption("Arrows: red = played move, green = engine best move")
+    st.caption(f"FEN: {selected_mistake.fen}")
 
     moves = _extract_mainline_uci(selected_game.raw_pgn)
     san_moves = _extract_mainline_san(selected_game.raw_pgn)
@@ -294,7 +380,15 @@ def _render_mistakes(session_factory, player: str) -> None:
         )
         jump_board = _board_before_ply(selected_game.raw_pgn, jump_ply)
         st.markdown(f"Board before ply `{jump_ply}`")
-        st.code(jump_board.unicode(), language="text")
+        jump_lastmove = None
+        if jump_ply > 1 and jump_ply - 2 < len(moves):
+            jump_lastmove = chess.Move.from_uci(moves[jump_ply - 2])
+        _render_svg_board(
+            jump_board,
+            size=board_size,
+            orientation=orientation,
+            lastmove=jump_lastmove,
+        )
 
         move_rows = []
         for idx, uci in enumerate(moves):
