@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from io import StringIO
 
+import chess
+import chess.pgn
 import streamlit as st
 from sqlalchemy import desc, func, select
 
@@ -14,6 +17,23 @@ from chess_vault.ingest.sync_service import SyncService
 
 def _to_table(items: Sequence[tuple[str, int]], key_name: str) -> list[dict[str, int | str]]:
     return [{key_name: name, "count": count} for name, count in items]
+
+
+def _extract_mainline_uci(raw_pgn: str) -> list[str]:
+    game = chess.pgn.read_game(StringIO(raw_pgn))
+    if game is None:
+        return []
+    return [move.uci() for move in game.mainline_moves()]
+
+
+def _board_before_ply(raw_pgn: str, ply: int) -> chess.Board:
+    board = chess.Board()
+    moves = _extract_mainline_uci(raw_pgn)
+    # "before ply N" means apply N-1 plies from the start position.
+    plies_to_apply = max(0, min(len(moves), ply - 1))
+    for uci in moves[:plies_to_apply]:
+        board.push_uci(uci)
+    return board
 
 
 def _render_sidebar() -> tuple[str, int, int]:
@@ -180,6 +200,9 @@ def _render_mistakes(session_factory, player: str) -> None:
 
     limit = int(st.number_input("Limit", min_value=1, max_value=200, value=30, step=1))
     category = st.selectbox("Category", options=["thrown_advantage"], index=0)
+    min_swing = int(
+        st.number_input("Minimum Swing (cp)", min_value=0, max_value=200000, value=0, step=25)
+    )
 
     with session_factory() as session:
         stmt = (
@@ -188,6 +211,7 @@ def _render_mistakes(session_factory, player: str) -> None:
             .where(
                 func.lower(GameMistake.player) == player.lower(),
                 GameMistake.category == category,
+                GameMistake.swing_cp >= min_swing,
             )
             .order_by(desc(GameMistake.swing_cp))
             .limit(limit)
@@ -196,6 +220,7 @@ def _render_mistakes(session_factory, player: str) -> None:
 
     table = [
         {
+            "id": idx + 1,
             "game_id": mistake.game_id,
             "source": game.source,
             "opening": game.opening or "(Unknown)",
@@ -207,9 +232,62 @@ def _render_mistakes(session_factory, player: str) -> None:
             "swing_cp": mistake.swing_cp,
             "fen": mistake.fen,
         }
-        for mistake, game in rows
+        for idx, (mistake, game) in enumerate(rows)
     ]
     st.dataframe(table, use_container_width=True)
+
+    if not rows:
+        return
+
+    st.markdown("**Mistake Detail**")
+    labels = [
+        (
+            f"#{idx + 1} game={mistake.game_id} ply={mistake.ply} "
+            f"swing={mistake.swing_cp} move={mistake.move_uci}"
+        )
+        for idx, (mistake, _game) in enumerate(rows)
+    ]
+    selected_label = st.selectbox("Select mistake", options=labels, index=0)
+    selected_index = labels.index(selected_label)
+    selected_mistake, selected_game = rows[selected_index]
+
+    c1, c2 = st.columns(2)
+    c1.write(f"Game ID: `{selected_game.id}`")
+    c1.write(f"Source: `{selected_game.source}`")
+    c1.write(f"Opening: `{selected_game.opening or '(Unknown)'}`")
+    c1.write(f"Players: `{selected_game.white_player}` vs `{selected_game.black_player}`")
+    c2.write(f"Ply: `{selected_mistake.ply}`")
+    c2.write(f"Move: `{selected_mistake.move_uci}`")
+    c2.write(f"Before: `{selected_mistake.before_eval_cp}`")
+    c2.write(f"After: `{selected_mistake.after_eval_cp}`")
+    c2.write(f"Swing: `{selected_mistake.swing_cp}`")
+
+    st.markdown("Position at detected mistake (from stored FEN)")
+    fen_board = chess.Board(selected_mistake.fen)
+    st.code(fen_board.unicode(), language="text")
+    st.caption(selected_mistake.fen)
+
+    moves = _extract_mainline_uci(selected_game.raw_pgn)
+    if moves:
+        jump_ply = int(
+            st.slider(
+                "Jump to board before ply",
+                min_value=1,
+                max_value=len(moves) + 1,
+                value=min(selected_mistake.ply, len(moves) + 1),
+                step=1,
+            )
+        )
+        jump_board = _board_before_ply(selected_game.raw_pgn, jump_ply)
+        st.markdown(f"Board before ply `{jump_ply}`")
+        st.code(jump_board.unicode(), language="text")
+
+        move_rows = [{"ply": idx + 1, "move_uci": uci} for idx, uci in enumerate(moves)]
+        st.markdown("Mainline moves")
+        st.dataframe(move_rows, use_container_width=True, height=240)
+
+    with st.expander("Raw PGN"):
+        st.code(selected_game.raw_pgn, language="text")
 
 
 def main() -> None:
