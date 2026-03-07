@@ -26,6 +26,19 @@ def _extract_mainline_uci(raw_pgn: str) -> list[str]:
     return [move.uci() for move in game.mainline_moves()]
 
 
+def _extract_mainline_san(raw_pgn: str) -> list[str]:
+    game = chess.pgn.read_game(StringIO(raw_pgn))
+    if game is None:
+        return []
+
+    board = game.board()
+    sans: list[str] = []
+    for move in game.mainline_moves():
+        sans.append(board.san(move))
+        board.push(move)
+    return sans
+
+
 def _board_before_ply(raw_pgn: str, ply: int) -> chess.Board:
     board = chess.Board()
     moves = _extract_mainline_uci(raw_pgn)
@@ -268,6 +281,7 @@ def _render_mistakes(session_factory, player: str) -> None:
     st.caption(selected_mistake.fen)
 
     moves = _extract_mainline_uci(selected_game.raw_pgn)
+    san_moves = _extract_mainline_san(selected_game.raw_pgn)
     if moves:
         jump_ply = int(
             st.slider(
@@ -282,8 +296,25 @@ def _render_mistakes(session_factory, player: str) -> None:
         st.markdown(f"Board before ply `{jump_ply}`")
         st.code(jump_board.unicode(), language="text")
 
-        move_rows = [{"ply": idx + 1, "move_uci": uci} for idx, uci in enumerate(moves)]
-        st.markdown("Mainline moves")
+        move_rows = []
+        for idx, uci in enumerate(moves):
+            ply = idx + 1
+            move_no = (idx // 2) + 1
+            side = "W" if (idx % 2) == 0 else "B"
+            san = san_moves[idx] if idx < len(san_moves) else ""
+            marker = "<-- detected" if ply == selected_mistake.ply else ""
+            move_rows.append(
+                {
+                    "ply": ply,
+                    "move_no": move_no,
+                    "side": side,
+                    "san": san,
+                    "uci": uci,
+                    "flag": marker,
+                }
+            )
+
+        st.markdown("Mainline moves (SAN + UCI)")
         st.dataframe(move_rows, use_container_width=True, height=240)
 
     with st.expander("Raw PGN"):
