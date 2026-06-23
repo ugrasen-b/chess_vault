@@ -134,6 +134,10 @@ def main() -> None:
         return
 
     if args.command == "analyze":
+        def analyze_progress(done: int, total: int) -> None:
+            if done % 20 == 0 or done == total:
+                print(f"[analyze] ...{done}/{total} games scanned")
+
         with session_factory() as session:
             service = AnalysisService(session)
             summary = service.analyze_player_games(
@@ -145,6 +149,7 @@ def main() -> None:
                 win_threshold_cp=args.win_threshold,
                 drop_to_cp=args.drop_to,
                 lookahead_plies=max(1, args.lookahead_plies),
+                on_progress=analyze_progress,
             )
             print(
                 f"analysis_run={summary.analysis_run_id} "

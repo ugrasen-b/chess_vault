@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from io import StringIO
@@ -128,6 +129,7 @@ class AnalysisService:
         win_threshold_cp: int,
         drop_to_cp: int,
         lookahead_plies: int,
+        on_progress: Callable[[int, int], None] | None = None,
     ) -> AnalyzeSummary:
         norm_player = player.strip().lower()
         player_filter = or_(
@@ -153,57 +155,62 @@ class AnalysisService:
                 lookahead_plies=lookahead_plies,
             )
             self.session.add(run)
-            self.session.flush()
+            # Commit immediately (not just flush) so the run row and every eval/mistake
+            # below survive a crash or interruption instead of rolling back with an
+            # uncommitted transaction.
+            self.session.commit()
 
             total_mistakes = 0
-            for game in games:
+            for index, game in enumerate(games, start=1):
                 color = self._player_color(game=game, player=norm_player)
-                if color is None:
-                    continue
+                boundaries = extract_position_boundaries(game.raw_pgn) if color is not None else []
 
-                boundaries = extract_position_boundaries(game.raw_pgn)
-                if len(boundaries) < 2:
-                    continue
-
-                eval_map: dict[int, int] = {}
-                for boundary in boundaries:
-                    eval_map[boundary.boundary_index] = self._get_or_create_eval(
-                        fen=boundary.fen,
-                        depth=depth,
-                        engine_name=analyzer.engine_name,
-                        engine_version=analyzer.engine_version or "unknown",
-                        player_color=color,
-                        analyzer=analyzer,
-                    )
-
-                findings = detect_thrown_advantage(
-                    boundaries=boundaries,
-                    eval_cp_by_boundary=eval_map,
-                    player_color=color,
-                    win_threshold_cp=win_threshold_cp,
-                    drop_to_cp=drop_to_cp,
-                    lookahead_plies=lookahead_plies,
-                )
-                strongest = max(findings, key=lambda f: f.swing_cp) if findings else None
-                if strongest is not None:
-                    self.session.add(
-                        GameMistake(
-                            analysis_run_id=run.id,
-                            game_id=game.id,
-                            player=player,
-                            category="thrown_advantage",
-                            ply=strongest.ply,
-                            fen=strongest.fen,
-                            move_uci=strongest.move_uci,
-                            before_eval_cp=strongest.before_eval_cp,
-                            after_eval_cp=strongest.after_eval_cp,
-                            swing_cp=strongest.swing_cp,
+                if color is not None and len(boundaries) >= 2:
+                    eval_map: dict[int, int] = {}
+                    for boundary in boundaries:
+                        eval_map[boundary.boundary_index] = self._get_or_create_eval(
+                            fen=boundary.fen,
+                            depth=depth,
+                            engine_name=analyzer.engine_name,
+                            engine_version=analyzer.engine_version or "unknown",
+                            player_color=color,
+                            analyzer=analyzer,
                         )
-                    )
-                    total_mistakes += 1
 
-            run.games_scanned = len(games)
-            run.mistakes_found = total_mistakes
+                    findings = detect_thrown_advantage(
+                        boundaries=boundaries,
+                        eval_cp_by_boundary=eval_map,
+                        player_color=color,
+                        win_threshold_cp=win_threshold_cp,
+                        drop_to_cp=drop_to_cp,
+                        lookahead_plies=lookahead_plies,
+                    )
+                    strongest = max(findings, key=lambda f: f.swing_cp) if findings else None
+                    if strongest is not None:
+                        self.session.add(
+                            GameMistake(
+                                analysis_run_id=run.id,
+                                game_id=game.id,
+                                player=player,
+                                category="thrown_advantage",
+                                ply=strongest.ply,
+                                fen=strongest.fen,
+                                move_uci=strongest.move_uci,
+                                before_eval_cp=strongest.before_eval_cp,
+                                after_eval_cp=strongest.after_eval_cp,
+                                swing_cp=strongest.swing_cp,
+                            )
+                        )
+                        total_mistakes += 1
+
+                # Bookkeeping runs every iteration (skipped games included) so games_scanned
+                # always reflects how far through the batch we got, even if interrupted.
+                run.games_scanned = index
+                run.mistakes_found = total_mistakes
+                self.session.commit()
+                if on_progress:
+                    on_progress(index, len(games))
+
             run.status = "completed"
             run.completed_at = datetime.utcnow()
             self.session.commit()
