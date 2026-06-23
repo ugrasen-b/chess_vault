@@ -1,0 +1,16 @@
+{
+  "name": "chess-vault-chessboard-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@lichess-org/chessground": "^10.1.1",
+    "streamlit-component-lib": "^2.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  }
+}

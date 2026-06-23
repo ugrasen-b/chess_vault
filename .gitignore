@@ -143,6 +143,9 @@ venv.bak/
 # Local engine binaries
 stockfish-windows-x86-64-avx2/
 
+# Streamlit component frontend build tooling (build/ output is committed, this isn't)
+src/chess_vault/ui/chessboard/frontend/node_modules/
+
 # Spyder project settings
 .spyderproject
 .spyproject

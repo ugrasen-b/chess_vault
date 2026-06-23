@@ -15,6 +15,7 @@ from chess_vault.analysis.features import build_player_report
 from chess_vault.db.models import AnalysisRun, EngineEval, Game, GameMistake
 from chess_vault.db.session import init_db, make_session_factory
 from chess_vault.ingest.sync_service import SyncService
+from chess_vault.ui.chessboard import chessboard, legal_dests
 
 
 def _to_table(items: Sequence[tuple[str, int]], key_name: str) -> list[dict[str, int | str]]:
@@ -425,6 +426,55 @@ def _render_mistakes(session_factory, player: str) -> None:
         st.code(selected_game.raw_pgn, language="text")
 
 
+def _render_board_demo() -> None:
+    st.subheader("Board Demo")
+    st.caption("Proving ground for the interactive chessground component — click or drag a piece.")
+
+    if "board_demo_moves" not in st.session_state:
+        st.session_state.board_demo_moves = []
+
+    board = chess.Board()
+    for uci in st.session_state.board_demo_moves:
+        board.push_uci(uci)
+
+    last_move = None
+    if st.session_state.board_demo_moves:
+        last_uci = st.session_state.board_demo_moves[-1]
+        last_move = (last_uci[0:2], last_uci[2:4])
+
+    orientation_label = st.selectbox("Orientation", options=["White", "Black"], index=0)
+
+    result = chessboard(
+        fen=board.fen(),
+        orientation=orientation_label.lower(),
+        dests=legal_dests(board),
+        last_move=last_move,
+        size=480,
+        key="board_demo",
+    )
+
+    if result and not board.is_game_over():
+        orig = chess.parse_square(result["orig"])
+        dest = chess.parse_square(result["dest"])
+        move = chess.Move(orig, dest)
+        if move not in board.legal_moves:
+            # Pawn reaching the last rank needs a promotion piece; auto-queen for now.
+            move = chess.Move(orig, dest, promotion=chess.QUEEN)
+        if move in board.legal_moves:
+            san = board.san(move)
+            board.push(move)
+            st.session_state.board_demo_moves.append(move.uci())
+            st.toast(f"Played {san}")
+            st.rerun()
+
+    if st.button("Reset board"):
+        st.session_state.board_demo_moves = []
+        st.rerun()
+
+    if st.session_state.board_demo_moves:
+        st.write("Moves: " + " ".join(st.session_state.board_demo_moves))
+
+
 def main() -> None:
     st.set_page_config(page_title="Chess Vault", layout="wide")
     st.title("Chess Vault")
@@ -437,7 +487,7 @@ def main() -> None:
 
     page = st.radio(
         "View",
-        options=["Dashboard", "Report", "Mistakes"],
+        options=["Dashboard", "Report", "Mistakes", "Board Demo"],
         horizontal=True,
     )
 
@@ -445,8 +495,10 @@ def main() -> None:
         _render_dashboard(session_factory, player)
     elif page == "Report":
         _render_report(session_factory, player, top_n=top_n, min_family_games=min_family_games)
-    else:
+    elif page == "Mistakes":
         _render_mistakes(session_factory, player)
+    else:
+        _render_board_demo()
 
 
 if __name__ == "__main__":
