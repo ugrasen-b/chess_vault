@@ -99,7 +99,7 @@ def _lookup_best_move_uci(session, mistake: GameMistake) -> str | None:
 
 def _render_sidebar() -> tuple[str, int, int]:
     st.sidebar.header("Player Settings")
-    player = st.sidebar.text_input("Player", value="uglyduckling24")
+    player = st.sidebar.text_input("Player", value="ugrasen")
     top_n = st.sidebar.number_input("Top N", min_value=1, max_value=50, value=10, step=1)
     min_family_games = st.sidebar.number_input(
         "Min Family Games", min_value=1, max_value=100, value=5, step=1
@@ -113,21 +113,31 @@ def _render_actions(session_factory) -> None:
     with st.sidebar.expander("Run Sync", expanded=False):
         lichess_user = st.text_input("Lichess Username", value="")
         chesscom_user = st.text_input("Chess.com Username", value="")
-        max_games = int(st.number_input("Lichess Max Games", min_value=1, max_value=500, value=100))
+        max_games = int(
+            st.number_input(
+                "Lichess Max Games", min_value=0, max_value=100000, value=100, help="0 = fetch all games"
+            )
+        )
         max_months = int(
-            st.number_input("Chess.com Max Months", min_value=1, max_value=24, value=6, step=1)
+            st.number_input(
+                "Chess.com Max Months", min_value=0, max_value=240, value=6, step=1, help="0 = fetch all months"
+            )
         )
         if st.button("Sync Now"):
             with session_factory() as session:
                 service = SyncService(session)
                 if lichess_user.strip():
-                    result = service.sync_lichess(lichess_user.strip(), max_games=max_games)
+                    result = service.sync_lichess(
+                        lichess_user.strip(), max_games=None if max_games == 0 else max_games
+                    )
                     st.success(
                         f"Lichess: fetched={result.fetched} inserted={result.inserted} "
                         f"skipped={result.skipped_existing}"
                     )
                 if chesscom_user.strip():
-                    result = service.sync_chesscom(chesscom_user.strip(), max_months=max_months)
+                    result = service.sync_chesscom(
+                        chesscom_user.strip(), max_months=None if max_months == 0 else max_months
+                    )
                     st.success(
                         f"Chess.com: fetched={result.fetched} inserted={result.inserted} "
                         f"skipped={result.skipped_existing}"

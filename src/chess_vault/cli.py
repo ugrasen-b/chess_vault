@@ -15,12 +15,17 @@ def build_parser() -> argparse.ArgumentParser:
     sync_parser = subparsers.add_parser("sync", help="Sync games from connected providers")
     sync_parser.add_argument("--lichess", type=str, default=None, help="Lichess username")
     sync_parser.add_argument("--chesscom", type=str, default=None, help="Chess.com username")
-    sync_parser.add_argument("--max-games", type=int, default=50, help="Max Lichess games to fetch")
+    sync_parser.add_argument(
+        "--max-games",
+        type=int,
+        default=50,
+        help="Max Lichess games to fetch (0 = fetch full history, no limit)",
+    )
     sync_parser.add_argument(
         "--max-months",
         type=int,
         default=3,
-        help="How many recent monthly archives to fetch from Chess.com",
+        help="How many recent monthly archives to fetch from Chess.com (0 = all months)",
     )
 
     report_parser = subparsers.add_parser("report", help="Show aggregated stats for a player")
@@ -62,18 +67,31 @@ def main() -> None:
         if not args.lichess and not args.chesscom:
             parser.error("Provide at least one source: --lichess and/or --chesscom")
 
+        def lichess_progress(n: int) -> None:
+            if n % 200 == 0:
+                print(f"[lichess] ...{n} games fetched so far")
+
+        def chesscom_progress(done: int, total: int) -> None:
+            print(f"[chesscom] archive {done}/{total} fetched")
+
         with session_factory() as session:
             service = SyncService(session)
 
             if args.lichess:
-                result = service.sync_lichess(username=args.lichess, max_games=args.max_games)
+                lichess_max = None if args.max_games <= 0 else args.max_games
+                result = service.sync_lichess(
+                    username=args.lichess, max_games=lichess_max, on_progress=lichess_progress
+                )
                 print(
                     f"[lichess] fetched={result.fetched} inserted={result.inserted} "
                     f"skipped={result.skipped_existing}"
                 )
 
             if args.chesscom:
-                result = service.sync_chesscom(username=args.chesscom, max_months=args.max_months)
+                chesscom_max = None if args.max_months <= 0 else args.max_months
+                result = service.sync_chesscom(
+                    username=args.chesscom, max_months=chesscom_max, on_progress=chesscom_progress
+                )
                 print(
                     f"[chesscom] fetched={result.fetched} inserted={result.inserted} "
                     f"skipped={result.skipped_existing}"

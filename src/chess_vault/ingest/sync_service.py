@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -23,14 +24,28 @@ class SyncService:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def sync_lichess(self, username: str, max_games: int = 50) -> SyncResult:
+    def sync_lichess(
+        self,
+        username: str,
+        max_games: int | None = 50,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> SyncResult:
         client = LichessClient()
-        pgn_games = client.fetch_user_games_pgn(username=username, max_games=max_games)
+        pgn_games = client.fetch_user_games_pgn(
+            username=username, max_games=max_games, on_progress=on_progress
+        )
         return self._store_games(source="lichess", pgn_games=pgn_games)
 
-    def sync_chesscom(self, username: str, max_months: int = 3) -> SyncResult:
+    def sync_chesscom(
+        self,
+        username: str,
+        max_months: int | None = 3,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> SyncResult:
         client = ChessComClient()
-        pgn_games = client.fetch_recent_games_pgn(username=username, max_months=max_months)
+        pgn_games = client.fetch_recent_games_pgn(
+            username=username, max_months=max_months, on_progress=on_progress
+        )
         return self._store_games(source="chesscom", pgn_games=pgn_games)
 
     def _store_games(self, source: str, pgn_games: list[str]) -> SyncResult:

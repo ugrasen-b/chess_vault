@@ -7,6 +7,14 @@ import re
 
 HEADER_RE = re.compile(r'^\[(?P<key>[^\s]+)\s+"(?P<value>.*)"\]$')
 
+# Same person, different handle per platform. Stored player fields are normalized to one
+# canonical name so reports/analysis can query a single identity across sources; raw_pgn
+# keeps the original platform handle untouched.
+_PLAYER_ALIASES: dict[str, str] = {
+    "orwellfan": "ugrasen",
+    "uglyduckling24": "ugrasen",
+}
+
 
 @dataclass(frozen=True)
 class NormalizedGame:
@@ -31,8 +39,8 @@ def normalize_pgn(source: str, raw_pgn: str) -> NormalizedGame:
     return NormalizedGame(
         source_game_id=source_game_id,
         source=source,
-        white_player=headers.get("White"),
-        black_player=headers.get("Black"),
+        white_player=_canonical_player(headers.get("White")),
+        black_player=_canonical_player(headers.get("Black")),
         result=headers.get("Result"),
         time_control=headers.get("TimeControl"),
         eco=headers.get("ECO"),
@@ -42,6 +50,12 @@ def normalize_pgn(source: str, raw_pgn: str) -> NormalizedGame:
         played_at=_parse_date(headers.get("UTCDate"), headers.get("UTCTime"), headers.get("Date")),
         raw_pgn=raw_pgn,
     )
+
+
+def _canonical_player(name: str | None) -> str | None:
+    if not name:
+        return name
+    return _PLAYER_ALIASES.get(name.strip().lower(), name)
 
 
 def _extract_headers(raw_pgn: str) -> dict[str, str]:

@@ -92,3 +92,23 @@ def test_normalize_pgn_uses_eco_when_opening_and_eco_url_missing() -> None:
 
     game = normalize_pgn(source="chesscom", raw_pgn=pgn)
     assert game.opening == "C20"
+
+
+def test_normalize_pgn_maps_known_player_aliases_to_canonical_name() -> None:
+    pgn = '''
+[Event "Live Chess"]
+[Site "https://www.chess.com/game/live/999"]
+[White "OrwellFan"]
+[Black "UglyDuckling24"]
+[Result "1-0"]
+
+1. e4 e5 1-0
+'''.strip()
+
+    game = normalize_pgn(source="chesscom", raw_pgn=pgn)
+
+    assert game.white_player == "ugrasen"
+    assert game.black_player == "ugrasen"
+    # raw_pgn must keep the original platform handles untouched.
+    assert '[White "OrwellFan"]' in game.raw_pgn
+    assert '[Black "UglyDuckling24"]' in game.raw_pgn
