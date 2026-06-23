@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -97,6 +97,35 @@ class EngineEval(Base):
             "engine_version",
             name="uq_engine_eval_key",
         ),
+    )
+
+
+class PositionOccurrence(Base):
+    __tablename__ = "position_occurrences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    position_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), nullable=False)
+    ply: Mapped[int] = mapped_column(Integer, nullable=False)
+    turn: Mapped[str] = mapped_column(String(1), nullable=False)
+    move_uci: Mapped[str] = mapped_column(String(16), nullable=False)
+    move_san: Mapped[str] = mapped_column(String(16), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("game_id", "ply", name="uq_position_occurrence_game_ply"),
+        Index("ix_position_occurrence_position_key", "position_key"),
+    )
+
+
+class IndexedGame(Base):
+    """Marks a game as processed by PositionIndexService, even if it produced zero
+    occurrence rows (e.g. an abandoned game with no moves) — so it isn't rescanned."""
+
+    __tablename__ = "indexed_games"
+
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), primary_key=True)
+    indexed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), nullable=False
     )
 
 

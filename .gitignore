@@ -1,3 +1,7 @@
+# Local SQLite data (regenerable via `chess-vault sync` + `chess-vault index-positions`)
+data/*.db
+data/*.db-*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from chess_vault.analysis.analyze_service import AnalysisService, is_mate_score
+from chess_vault.analysis.explorer import PositionIndexService, lookup_position
 from chess_vault.analysis.features import build_player_report
 from chess_vault.db.session import init_db, make_session_factory
 from chess_vault.ingest.sync_service import SyncService
@@ -52,6 +53,18 @@ def build_parser() -> argparse.ArgumentParser:
     mistakes_parser.add_argument("--player", required=True, type=str, help="Player username")
     mistakes_parser.add_argument("--type", default="thrown_advantage", type=str, help="Mistake category")
     mistakes_parser.add_argument("--limit", default=20, type=int)
+
+    subparsers.add_parser(
+        "index-positions", help="Build/update the per-position move index used by the explorer"
+    )
+
+    explorer_parser = subparsers.add_parser(
+        "explorer", help="Look up how often a position was reached and what was played next"
+    )
+    explorer_parser.add_argument("--player", required=True, type=str, help="Player username")
+    explorer_parser.add_argument(
+        "--moves", type=str, default="", help="Space-separated SAN moves from the start position"
+    )
 
     return parser
 
@@ -174,6 +187,38 @@ def main() -> None:
                     f"  - game_id={row.game_id} ply={row.ply} move={row.move_uci} "
                     f"before={row.before_eval_cp} after={row.after_eval_cp} "
                     f"swing={row.swing_cp} mate_swing={'yes' if mate_swing else 'no'}"
+                )
+        return
+
+    if args.command == "index-positions":
+        def index_progress(done: int, total: int) -> None:
+            if total and (done % 500 == 0 or done == total):
+                print(f"[index-positions] ...{done}/{total} games indexed so far")
+
+        with session_factory() as session:
+            service = PositionIndexService(session)
+            summary = service.index_unindexed_games(on_progress=index_progress)
+            print(
+                f"games_indexed={summary.games_indexed} "
+                f"occurrences_inserted={summary.occurrences_inserted}"
+            )
+        return
+
+    if args.command == "explorer":
+        moves = args.moves.split() if args.moves.strip() else []
+        with session_factory() as session:
+            stats = lookup_position(session=session, player=args.player, moves=moves)
+            print(f"position_key={stats.position_key}")
+            print(f"fen={stats.fen}")
+            print(
+                f"total_games={stats.total_games} white_wins={stats.white_wins} "
+                f"black_wins={stats.black_wins} draws={stats.draws}"
+            )
+            print("next_moves:")
+            for move in stats.next_moves:
+                print(
+                    f"  - {move.move_san} ({move.move_uci}): games={move.games} "
+                    f"white_wins={move.white_wins} black_wins={move.black_wins} draws={move.draws}"
                 )
         return
 
