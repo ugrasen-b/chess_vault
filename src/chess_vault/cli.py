@@ -65,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     explorer_parser.add_argument(
         "--moves", type=str, default="", help="Space-separated SAN moves from the start position"
     )
+    explorer_parser.add_argument(
+        "--perspective",
+        choices=["white", "black", "both"],
+        default="both",
+        help="Filter to games where the player had this color (default: both)",
+    )
 
     return parser
 
@@ -206,8 +212,9 @@ def main() -> None:
 
     if args.command == "explorer":
         moves = args.moves.split() if args.moves.strip() else []
+        perspective = None if args.perspective == "both" else args.perspective
         with session_factory() as session:
-            stats = lookup_position(session=session, player=args.player, moves=moves)
+            stats = lookup_position(session=session, player=args.player, moves=moves, perspective=perspective)
             print(f"position_key={stats.position_key}")
             print(f"fen={stats.fen}")
             print(

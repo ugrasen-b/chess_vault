@@ -162,3 +162,30 @@ def test_lookup_position_scopes_deeper_position_to_player_games() -> None:
     by_san = {move.move_san: move for move in stats.next_moves}
     assert by_san["e5"].games == 1
     assert by_san["c5"].games == 1
+
+
+def test_lookup_position_perspective_filters_by_player_color() -> None:
+    Session = _make_session_factory()
+    with Session() as session:
+        session.add_all(
+            [
+                Game(source="chesscom", source_game_id="g1", white_player="hero", black_player="opp1",
+                     result="1-0", raw_pgn=GAME_E4_E5_NF3),
+                Game(source="chesscom", source_game_id="g2", white_player="hero", black_player="opp2",
+                     result="0-1", raw_pgn=GAME_E4_C5),
+                Game(source="lichess", source_game_id="g3", white_player="opp3", black_player="hero",
+                     result="1/2-1/2", raw_pgn=GAME_D4),
+            ]
+        )
+        session.commit()
+
+        PositionIndexService(session).index_unindexed_games()
+
+        white_stats = lookup_position(session=session, player="hero", moves=[], perspective="white")
+        black_stats = lookup_position(session=session, player="hero", moves=[], perspective="black")
+
+    assert white_stats.total_games == 2
+    assert {move.move_san for move in white_stats.next_moves} == {"e4"}
+
+    assert black_stats.total_games == 1
+    assert {move.move_san for move in black_stats.next_moves} == {"d4"}

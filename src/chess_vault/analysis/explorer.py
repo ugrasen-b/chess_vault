@@ -109,7 +109,12 @@ def _tally(result: str | None, counts: dict[str, int]) -> None:
         counts["draws"] += 1
 
 
-def lookup_position(session: Session, player: str, moves: list[str]) -> ExplorerStats:
+def lookup_position(
+    session: Session,
+    player: str,
+    moves: list[str],
+    perspective: str | None = None,
+) -> ExplorerStats:
     norm_player = player.strip().lower()
     board = chess.Board()
     for token in moves:
@@ -117,15 +122,22 @@ def lookup_position(session: Session, player: str, moves: list[str]) -> Explorer
 
     position_key = position_key_from_fen(board.fen())
 
+    if perspective == "white":
+        player_clause = func.lower(Game.white_player) == norm_player
+    elif perspective == "black":
+        player_clause = func.lower(Game.black_player) == norm_player
+    else:
+        player_clause = or_(
+            func.lower(Game.white_player) == norm_player,
+            func.lower(Game.black_player) == norm_player,
+        )
+
     rows = session.execute(
         select(PositionOccurrence.move_uci, PositionOccurrence.move_san, Game.result)
         .join(Game, Game.id == PositionOccurrence.game_id)
         .where(
             PositionOccurrence.position_key == position_key,
-            or_(
-                func.lower(Game.white_player) == norm_player,
-                func.lower(Game.black_player) == norm_player,
-            ),
+            player_clause,
         )
     ).all()
 
