@@ -129,6 +129,41 @@ class IndexedGame(Base):
     )
 
 
+class Repertoire(Base):
+    __tablename__ = "repertoires"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    side: Mapped[str] = mapped_column(String(8), nullable=False, default="both")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (UniqueConstraint("name", name="uq_repertoire_name"),)
+
+
+class RepertoireMove(Base):
+    """One node of a repertoire tree: at the position identified by `position_key`,
+    `move_uci` is a move the repertoire endorses. Multiple rows can share a
+    position_key (alternative book moves / opponent replies in the prepared line)."""
+
+    __tablename__ = "repertoire_moves"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    repertoire_id: Mapped[int] = mapped_column(ForeignKey("repertoires.id"), nullable=False)
+    position_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    move_uci: Mapped[str] = mapped_column(String(16), nullable=False)
+    move_san: Mapped[str] = mapped_column(String(16), nullable=False)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "repertoire_id", "position_key", "move_uci", name="uq_repertoire_move"
+        ),
+        Index("ix_repertoire_move_lookup", "repertoire_id", "position_key"),
+    )
+
+
 class GameMistake(Base):
     __tablename__ = "game_mistakes"
 

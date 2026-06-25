@@ -11,7 +11,9 @@ import streamlit.components.v1 as components
 from sqlalchemy import desc, func, select
 
 from chess_vault.analysis.analyze_service import AnalysisService, is_mate_score
+from chess_vault.analysis.explorer import lookup_position, position_key_from_fen
 from chess_vault.analysis.features import build_player_report
+from chess_vault.analysis.repertoire import RepertoireService
 from chess_vault.db.models import AnalysisRun, EngineEval, Game, GameMistake
 from chess_vault.db.session import init_db, make_session_factory
 from chess_vault.ingest.sync_service import SyncService
@@ -426,6 +428,245 @@ def _render_mistakes(session_factory, player: str) -> None:
         st.code(selected_game.raw_pgn, language="text")
 
 
+def _format_movetext(sans: list[str]) -> str:
+    parts = []
+    for idx, san in enumerate(sans):
+        parts.append(f"{idx // 2 + 1}.{san}" if idx % 2 == 0 else san)
+    return " ".join(parts)
+
+
+def _render_result_bar(white_wins: int, draws: int, black_wins: int, height: int = 18) -> None:
+    total = white_wins + draws + black_wins
+    if total == 0:
+        return
+    segments = [
+        (white_wins / total * 100, "#e8e8e8", "#333"),
+        (draws / total * 100, "#9e9e9e", "#fff"),
+        (black_wins / total * 100, "#4a4a4a", "#fff"),
+    ]
+    cells = "".join(
+        f'<div style="width:{pct:.4f}%;background:{bg};color:{fg};">'
+        f'{f"{pct:.0f}%" if pct >= 12 else ""}</div>'
+        for pct, bg, fg in segments
+    )
+    st.markdown(
+        f'<div style="display:flex;width:100%;height:{height}px;border-radius:4px;'
+        f'overflow:hidden;font-size:11px;line-height:{height}px;text-align:center;">{cells}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_opening_explorer(session_factory, player: str) -> None:
+    st.subheader("Opening Explorer")
+    st.caption("Play through the board to see how often you've reached this position and what came next.")
+    if not player:
+        st.info("Enter a player in the sidebar.")
+        return
+
+    if "explorer_moves" not in st.session_state:
+        st.session_state.explorer_moves = []
+
+    control_cols = st.columns(2)
+    perspective_label = control_cols[0].selectbox(
+        "Perspective", options=["Both", "White", "Black"], key="explorer_perspective"
+    )
+    orientation_label = control_cols[1].selectbox(
+        "Orientation", options=["White", "Black"], key="explorer_orientation"
+    )
+
+    board = chess.Board()
+    san_moves: list[str] = []
+    for uci in st.session_state.explorer_moves:
+        move = chess.Move.from_uci(uci)
+        san_moves.append(board.san(move))
+        board.push(move)
+
+    last_move = None
+    if st.session_state.explorer_moves:
+        last_uci = st.session_state.explorer_moves[-1]
+        last_move = (last_uci[0:2], last_uci[2:4])
+
+    board_col, table_col = st.columns([1, 1])
+
+    with board_col:
+        result = chessboard(
+            fen=board.fen(),
+            orientation=orientation_label.lower(),
+            dests=legal_dests(board),
+            last_move=last_move,
+            size=420,
+            key="explorer_board",
+        )
+
+        if result and not board.is_game_over():
+            orig = chess.parse_square(result["orig"])
+            dest = chess.parse_square(result["dest"])
+            move = chess.Move(orig, dest)
+            if move not in board.legal_moves:
+                # Pawn reaching the last rank needs a promotion piece; auto-queen for now.
+                move = chess.Move(orig, dest, promotion=chess.QUEEN)
+            if move in board.legal_moves:
+                st.session_state.explorer_moves.append(move.uci())
+                st.rerun()
+
+        nav_cols = st.columns(2)
+        if nav_cols[0].button(
+            "Back", disabled=not st.session_state.explorer_moves, use_container_width=True
+        ):
+            st.session_state.explorer_moves.pop()
+            st.rerun()
+        if nav_cols[1].button(
+            "Reset", disabled=not st.session_state.explorer_moves, use_container_width=True
+        ):
+            st.session_state.explorer_moves = []
+            st.rerun()
+
+        st.caption(_format_movetext(san_moves) if san_moves else "Start position")
+        st.caption(f"FEN: {board.fen()}")
+
+    perspective = None if perspective_label == "Both" else perspective_label.lower()
+    with session_factory() as session:
+        stats = lookup_position(session=session, player=player, moves=san_moves, perspective=perspective)
+
+    with table_col:
+        scope_note = f" (as {perspective_label})" if perspective else ""
+        st.markdown(f"**{stats.total_games}** of your games reached this position{scope_note}")
+        if stats.total_games:
+            _render_result_bar(stats.white_wins, stats.draws, stats.black_wins)
+            st.caption(f"White {stats.white_wins} · Draws {stats.draws} · Black {stats.black_wins}")
+
+        if not stats.next_moves:
+            st.info("No games in your history continue from here.")
+            return
+
+        st.markdown("**Next moves**")
+        header = st.columns([1, 1, 4, 1])
+        header[0].caption("Move")
+        header[1].caption("Games")
+        header[2].caption("Result")
+        for move in stats.next_moves:
+            row = st.columns([1, 1, 4, 1])
+            row[0].write(f"**{move.move_san}**")
+            row[1].write(str(move.games))
+            with row[2]:
+                _render_result_bar(move.white_wins, move.draws, move.black_wins, height=14)
+            if row[3].button("Play", key=f"explorer_play_{move.move_uci}"):
+                st.session_state.explorer_moves.append(move.move_uci)
+                st.rerun()
+
+
+def _render_repertoire(session_factory) -> None:
+    st.subheader("Repertoire")
+    st.caption(
+        "Build a named repertoire by playing lines on the board and annotating moves. "
+        "Use Back to return to an earlier position and play an alternative to branch."
+    )
+
+    with session_factory() as session:
+        repertoires = RepertoireService(session).list_repertoires()
+        rep_options = {f"{r.name} ({r.side})": r.id for r in repertoires}
+
+    with st.expander("Create a new repertoire", expanded=not repertoires):
+        new_name = st.text_input("Name", value="", key="rep_new_name")
+        new_side = st.selectbox("Side", options=["white", "black", "both"], key="rep_new_side")
+        if st.button("Create repertoire"):
+            if not new_name.strip():
+                st.error("Name is required.")
+            elif new_name.strip() in {r.name for r in repertoires}:
+                st.error("A repertoire with that name already exists.")
+            else:
+                with session_factory() as session:
+                    RepertoireService(session).create_repertoire(new_name.strip(), new_side)
+                st.rerun()
+
+    if not rep_options:
+        st.info("Create a repertoire to start adding lines.")
+        return
+
+    selected_label = st.selectbox("Active repertoire", options=list(rep_options.keys()))
+    repertoire_id = rep_options[selected_label]
+
+    if "rep_moves" not in st.session_state:
+        st.session_state.rep_moves = []
+
+    board = chess.Board()
+    san_moves: list[str] = []
+    for uci in st.session_state.rep_moves:
+        move = chess.Move.from_uci(uci)
+        san_moves.append(board.san(move))
+        board.push(move)
+
+    last_move = None
+    if st.session_state.rep_moves:
+        last_uci = st.session_state.rep_moves[-1]
+        last_move = (last_uci[0:2], last_uci[2:4])
+
+    orientation_label = st.selectbox("Orientation", options=["White", "Black"], key="rep_orient")
+
+    board_col, edit_col = st.columns([1, 1])
+
+    with board_col:
+        result = chessboard(
+            fen=board.fen(),
+            orientation=orientation_label.lower(),
+            dests=legal_dests(board),
+            last_move=last_move,
+            size=420,
+            key="rep_board",
+        )
+        if result and not board.is_game_over():
+            orig = chess.parse_square(result["orig"])
+            dest = chess.parse_square(result["dest"])
+            move = chess.Move(orig, dest)
+            if move not in board.legal_moves:
+                move = chess.Move(orig, dest, promotion=chess.QUEEN)
+            if move in board.legal_moves:
+                st.session_state.rep_moves.append(move.uci())
+                st.rerun()
+
+        nav_cols = st.columns(2)
+        if nav_cols[0].button(
+            "Back", disabled=not st.session_state.rep_moves, use_container_width=True, key="rep_back"
+        ):
+            st.session_state.rep_moves.pop()
+            st.rerun()
+        if nav_cols[1].button(
+            "Clear board", disabled=not st.session_state.rep_moves, use_container_width=True, key="rep_clear"
+        ):
+            st.session_state.rep_moves = []
+            st.rerun()
+
+        st.caption(_format_movetext(san_moves) if san_moves else "Start position")
+
+        # Show what this repertoire already knows at the current position.
+        with session_factory() as session:
+            known = RepertoireService(session).book_moves_at(
+                repertoire_id, position_key_from_fen(board.fen())
+            )
+        if known:
+            st.caption("Already in book here: " + ", ".join(m.move_san for m in known))
+
+    with edit_col:
+        if not san_moves:
+            st.info("Play moves on the board to build a line, then add notes and save.")
+        else:
+            st.markdown("**Notes for this line** (optional, per move)")
+            for index, san in enumerate(san_moves):
+                move_no = index // 2 + 1
+                label = f"{move_no}.{san}" if index % 2 == 0 else f"{move_no}...{san}"
+                st.text_input(label, key=f"rep_note_{index}")
+
+            if st.button("Save line to repertoire", type="primary"):
+                comment_by_index = {
+                    i: st.session_state.get(f"rep_note_{i}", "") for i in range(len(san_moves))
+                }
+                with session_factory() as session:
+                    touched = RepertoireService(session).add_line(
+                        repertoire_id, st.session_state.rep_moves, comment_by_index
+                    )
+                st.success(f"Saved {touched} move(s) into '{selected_label}'.")
+
+
 def _render_board_demo() -> None:
     st.subheader("Board Demo")
     st.caption("Proving ground for the interactive chessground component — click or drag a piece.")
@@ -487,7 +728,7 @@ def main() -> None:
 
     page = st.radio(
         "View",
-        options=["Dashboard", "Report", "Mistakes", "Board Demo"],
+        options=["Dashboard", "Report", "Mistakes", "Opening Explorer", "Repertoire", "Board Demo"],
         horizontal=True,
     )
 
@@ -497,6 +738,10 @@ def main() -> None:
         _render_report(session_factory, player, top_n=top_n, min_family_games=min_family_games)
     elif page == "Mistakes":
         _render_mistakes(session_factory, player)
+    elif page == "Opening Explorer":
+        _render_opening_explorer(session_factory, player)
+    elif page == "Repertoire":
+        _render_repertoire(session_factory)
     else:
         _render_board_demo()
 
