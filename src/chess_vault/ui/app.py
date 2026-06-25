@@ -8,12 +8,12 @@ import chess.pgn
 import chess.svg
 import streamlit as st
 import streamlit.components.v1 as components
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 
 from chess_vault.analysis.analyze_service import AnalysisService, is_mate_score
 from chess_vault.analysis.explorer import lookup_position, position_key_from_fen
 from chess_vault.analysis.features import build_player_report
-from chess_vault.analysis.repertoire import RepertoireService
+from chess_vault.analysis.repertoire import RepertoireService, find_deviations
 from chess_vault.db.models import AnalysisRun, EngineEval, Game, GameMistake
 from chess_vault.db.session import init_db, make_session_factory
 from chess_vault.ingest.sync_service import SyncService
@@ -466,13 +466,22 @@ def _render_opening_explorer(session_factory, player: str) -> None:
     if "explorer_moves" not in st.session_state:
         st.session_state.explorer_moves = []
 
-    control_cols = st.columns(2)
+    with session_factory() as session:
+        repertoires = RepertoireService(session).list_repertoires()
+    rep_options: dict[str, int | None] = {"(none)": None}
+    rep_options.update({f"{r.name} ({r.side})": r.id for r in repertoires})
+
+    control_cols = st.columns(3)
     perspective_label = control_cols[0].selectbox(
         "Perspective", options=["Both", "White", "Black"], key="explorer_perspective"
     )
     orientation_label = control_cols[1].selectbox(
         "Orientation", options=["White", "Black"], key="explorer_orientation"
     )
+    rep_label = control_cols[2].selectbox(
+        "Repertoire overlay", options=list(rep_options.keys()), key="explorer_repertoire"
+    )
+    repertoire_id = rep_options[rep_label]
 
     board = chess.Board()
     san_moves: list[str] = []
@@ -525,10 +534,26 @@ def _render_opening_explorer(session_factory, player: str) -> None:
         st.caption(f"FEN: {board.fen()}")
 
     perspective = None if perspective_label == "Both" else perspective_label.lower()
+    book_here = []
     with session_factory() as session:
         stats = lookup_position(session=session, player=player, moves=san_moves, perspective=perspective)
+        if repertoire_id is not None:
+            book_here = RepertoireService(session).book_moves_at(
+                repertoire_id, position_key_from_fen(board.fen())
+            )
+    book_ucis = {bm.move_uci for bm in book_here}
 
     with table_col:
+        if repertoire_id is not None:
+            if book_here:
+                lines = []
+                for bm in book_here:
+                    note = f" — *{bm.comment}*" if bm.comment else ""
+                    lines.append(f"📖 **{bm.move_san}**{note}")
+                st.markdown("**Repertoire says here:**  \n" + "  \n".join(lines))
+            else:
+                st.caption("📖 This position isn't in the selected repertoire.")
+
         scope_note = f" (as {perspective_label})" if perspective else ""
         st.markdown(f"**{stats.total_games}** of your games reached this position{scope_note}")
         if stats.total_games:
@@ -546,7 +571,8 @@ def _render_opening_explorer(session_factory, player: str) -> None:
         header[2].caption("Result")
         for move in stats.next_moves:
             row = st.columns([1, 1, 4, 1])
-            row[0].write(f"**{move.move_san}**")
+            book_mark = " 📖" if move.move_uci in book_ucis else ""
+            row[0].write(f"**{move.move_san}**{book_mark}")
             row[1].write(str(move.games))
             with row[2]:
                 _render_result_bar(move.white_wins, move.draws, move.black_wins, height=14)
@@ -667,6 +693,156 @@ def _render_repertoire(session_factory) -> None:
                 st.success(f"Saved {touched} move(s) into '{selected_label}'.")
 
 
+def _player_color_in_game(game: Game, player: str) -> chess.Color | None:
+    p = player.strip().lower()
+    if (game.white_player or "").lower() == p:
+        return chess.WHITE
+    if (game.black_player or "").lower() == p:
+        return chess.BLACK
+    return None
+
+
+def _render_game_review(session_factory, player: str) -> None:
+    st.subheader("Game Review")
+    st.caption("Step through one of your games and see where you left your prepared repertoire.")
+    if not player:
+        st.info("Enter a player in the sidebar.")
+        return
+
+    norm_player = player.strip().lower()
+    with session_factory() as session:
+        repertoires = RepertoireService(session).list_repertoires()
+    if not repertoires:
+        st.info("Create a repertoire first (Repertoire tab) to check your games against it.")
+        return
+
+    rep_options = {f"{r.name} ({r.side})": r for r in repertoires}
+    fcols = st.columns([2, 1, 1])
+    rep_label = fcols[0].selectbox("Repertoire", options=list(rep_options.keys()))
+    repertoire = rep_options[rep_label]
+    source = fcols[1].selectbox("Source", options=["all", "lichess", "chesscom"])
+    limit = int(fcols[2].number_input("Scan last N games", min_value=10, max_value=2000, value=100, step=10))
+    only_deviated = st.checkbox("Only games where I left book", value=True)
+
+    # Constrain to the side this repertoire is for (a White repertoire is only
+    # meaningful against games you played as White).
+    if repertoire.side == "white":
+        color_filter = func.lower(Game.white_player) == norm_player
+    elif repertoire.side == "black":
+        color_filter = func.lower(Game.black_player) == norm_player
+    else:
+        color_filter = or_(
+            func.lower(Game.white_player) == norm_player,
+            func.lower(Game.black_player) == norm_player,
+        )
+
+    with session_factory() as session:
+        stmt = select(Game).where(color_filter)
+        if source != "all":
+            stmt = stmt.where(Game.source == source)
+        stmt = stmt.order_by(desc(Game.played_at)).limit(limit)
+        games = session.execute(stmt).scalars().all()
+        book = RepertoireService(session).load_book(repertoire.id)
+
+    # Precompute the first deviation per game (so we can label and optionally filter).
+    first_dev_by_game: dict[int, object] = {}
+    candidates = []
+    for game in games:
+        color = _player_color_in_game(game, norm_player)
+        if color is None:
+            continue
+        uci_moves = _extract_mainline_uci(game.raw_pgn)
+        devs = find_deviations(book, uci_moves, color)
+        if devs:
+            first_dev_by_game[game.id] = devs[0]
+        if only_deviated and not devs:
+            continue
+        candidates.append(game)
+
+    st.caption(
+        f"Scanned {len(games)} game(s); {len(first_dev_by_game)} left book against this repertoire."
+    )
+    if not candidates:
+        st.info("No matching games. Try turning off the filter or widening the scan.")
+        return
+
+    def game_label(g: Game) -> str:
+        date = g.played_at.date().isoformat() if g.played_at else "?"
+        flag = " ⚠️ left book" if g.id in first_dev_by_game else ""
+        return f"#{g.id} {g.source} | {g.white_player} vs {g.black_player} | {g.result} | {date}{flag}"
+
+    labels = [game_label(g) for g in candidates]
+    selected_label = st.selectbox("Game", options=labels)
+    game = candidates[labels.index(selected_label)]
+
+    color = _player_color_in_game(game, norm_player)
+    orientation = color if color is not None else chess.WHITE
+    uci_moves = _extract_mainline_uci(game.raw_pgn)
+    san_moves = _extract_mainline_san(game.raw_pgn)
+    deviations = find_deviations(book, uci_moves, color) if color is not None else []
+    dev_by_ply = {d.ply: d for d in deviations}
+
+    if deviations:
+        first = deviations[0]
+        move_no = (first.ply - 1) // 2 + 1
+        expected = ", ".join(bm.move_san for bm in first.expected)
+        st.warning(
+            f"Left book at move {move_no} ({first.played_san}). Repertoire here: {expected}."
+        )
+        with st.expander(f"All {len(deviations)} deviation(s)", expanded=len(deviations) <= 5):
+            for d in deviations:
+                no = (d.ply - 1) // 2 + 1
+                exp = ", ".join(bm.move_san for bm in d.expected)
+                notes = "; ".join(bm.comment for bm in d.expected if bm.comment)
+                line = f"- Move {no}: you played **{d.played_san}**, book: **{exp}**"
+                if notes:
+                    line += f" — *{notes}*"
+                st.markdown(line)
+    else:
+        st.success("You stayed within this repertoire wherever it covered the game.")
+
+    # Board stepper. Default to the first deviation so it's front-and-center.
+    default_ply = deviations[0].ply if deviations else 1
+    max_ply = len(uci_moves) + 1
+    jump_ply = int(
+        st.slider(
+            "Step to position before move (ply)",
+            min_value=1,
+            max_value=max_ply,
+            value=min(default_ply, max_ply),
+            step=1,
+        )
+    )
+
+    step_board = _board_before_ply(game.raw_pgn, jump_ply)
+    arrows: list[chess.svg.Arrow] = []
+    current_dev = dev_by_ply.get(jump_ply)
+    if current_dev is not None:
+        played = chess.Move.from_uci(current_dev.played_uci)
+        if played in step_board.legal_moves:
+            arrows.append(chess.svg.Arrow(played.from_square, played.to_square, color="#d62828"))
+        for bm in current_dev.expected:
+            book_move = chess.Move.from_uci(bm.move_uci)
+            if book_move in step_board.legal_moves:
+                arrows.append(
+                    chess.svg.Arrow(book_move.from_square, book_move.to_square, color="#2a9d8f")
+                )
+
+    last_move = None
+    if jump_ply > 1 and jump_ply - 2 < len(uci_moves):
+        last_move = chess.Move.from_uci(uci_moves[jump_ply - 2])
+
+    _render_svg_board(step_board, size=440, orientation=orientation, lastmove=last_move, arrows=arrows)
+
+    if current_dev is not None:
+        st.caption("Arrows: red = what you played, green = repertoire move(s)")
+        notes = "; ".join(bm.comment for bm in current_dev.expected if bm.comment)
+        if notes:
+            st.info(f"📖 Note: {notes}")
+    elif jump_ply - 1 < len(san_moves):
+        st.caption(f"Next move in game: {san_moves[jump_ply - 1]}")
+
+
 def _render_board_demo() -> None:
     st.subheader("Board Demo")
     st.caption("Proving ground for the interactive chessground component — click or drag a piece.")
@@ -728,7 +904,15 @@ def main() -> None:
 
     page = st.radio(
         "View",
-        options=["Dashboard", "Report", "Mistakes", "Opening Explorer", "Repertoire", "Board Demo"],
+        options=[
+            "Dashboard",
+            "Report",
+            "Mistakes",
+            "Opening Explorer",
+            "Repertoire",
+            "Game Review",
+            "Board Demo",
+        ],
         horizontal=True,
     )
 
@@ -742,6 +926,8 @@ def main() -> None:
         _render_opening_explorer(session_factory, player)
     elif page == "Repertoire":
         _render_repertoire(session_factory)
+    elif page == "Game Review":
+        _render_game_review(session_factory, player)
     else:
         _render_board_demo()
 
